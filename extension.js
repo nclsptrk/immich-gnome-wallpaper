@@ -225,8 +225,9 @@ export default class ImmichWallpaperExtension extends Extension {
         let serverUrl = this._settings.get_string('server-url');
         let email = this._settings.get_string('email');
         let password = this._settings.get_string('password');
+        let apiKey = this._settings.get_string('apikey');
         
-        if (!serverUrl || !email || !password) {
+        if (!(serverUrl && ((email && password) || apiKey))) {
             console.log('Immich Wallpaper: Missing configuration');
             callback(false, 'Missing configuration (server URL, email, or password)');
             return;
@@ -236,87 +237,92 @@ export default class ImmichWallpaperExtension extends Extension {
             serverUrl = serverUrl.slice(0, -1);
         }
         
-        let authUrl = `${serverUrl}/api/auth/login`;
-        let message;
-        
-        try {
-            message = Soup.Message.new('POST', authUrl);
-            if (!message) {
-                console.log('Immich Wallpaper: Invalid server URL');
-                callback(false, 'Invalid server URL');
+        if(apiKey) {
+            callback(true, null);
+            return;
+        } else {
+            let authUrl = `${serverUrl}/api/auth/login`;
+            let message;
+            
+            try {
+                message = Soup.Message.new('POST', authUrl);
+                if (!message) {
+                    console.log('Immich Wallpaper: Invalid server URL');
+                    callback(false, 'Invalid server URL');
+                    return;
+                }
+            } catch (e) {
+                console.log(`Immich Wallpaper: Error creating request: ${e}`);
+                callback(false, 'Invalid server URL format');
                 return;
             }
-        } catch (e) {
-            console.log(`Immich Wallpaper: Error creating request: ${e}`);
-            callback(false, 'Invalid server URL format');
-            return;
-        }
-        
-        let requestBody = JSON.stringify({
-            email: email,
-            password: password
-        });
-        
-        message.set_request_body_from_bytes(
-            'application/json',
-            new GLib.Bytes(requestBody)
-        );
-        
-        this._session.send_and_read_async(
-            message,
-            GLib.PRIORITY_DEFAULT,
-            null,
-            (session, result) => {
-                try {
-                    let bytes = session.send_and_read_finish(result);
-                    let data = bytes.get_data();
-                    
-                    if (!data || data.length === 0) {
-                        console.log('Immich Wallpaper: Empty response from server');
-                        callback(false, 'Empty response from server');
-                        return;
-                    }
-                    
-                    let responseText = new TextDecoder().decode(data);
-                    let status = message.get_status();
-                    
-                    if (status === 201 || status === 200) {
-                        let response;
-                        try {
-                            response = JSON.parse(responseText);
-                        } catch (parseError) {
-                            console.log(`Immich Wallpaper: Invalid JSON response: ${parseError}`);
-                            callback(false, 'Invalid response from server');
+            
+            let requestBody = JSON.stringify({
+                email: email,
+                password: password
+            });
+            
+            message.set_request_body_from_bytes(
+                'application/json',
+                new GLib.Bytes(requestBody)
+            );
+            
+            this._session.send_and_read_async(
+                message,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (session, result) => {
+                    try {
+                        let bytes = session.send_and_read_finish(result);
+                        let data = bytes.get_data();
+                        
+                        if (!data || data.length === 0) {
+                            console.log('Immich Wallpaper: Empty response from server');
+                            callback(false, 'Empty response from server');
                             return;
                         }
                         
-                        if (!response.accessToken) {
-                            console.log('Immich Wallpaper: No access token in response');
-                            callback(false, 'No access token received');
-                            return;
-                        }
+                        let responseText = new TextDecoder().decode(data);
+                        let status = message.get_status();
                         
-                        this._accessToken = response.accessToken;
-                        console.log('Immich Wallpaper: Authentication successful');
-                        console.log(`Immich Wallpaper: Token: ${this._accessToken.substring(0, 20)}...`);
-                        callback(true, null);
-                    } else if (status === 401) {
-                        console.log('Immich Wallpaper: Invalid credentials');
-                        callback(false, 'Invalid email or password');
-                    } else if (status === 0) {
-                        console.log('Immich Wallpaper: Could not connect to server');
-                        callback(false, 'Could not connect to server');
-                    } else {
-                        console.log(`Immich Wallpaper: Auth failed with status ${status}`);
-                        console.log(`Immich Wallpaper: Response: ${responseText}`);
-                        callback(false, `Server error (status ${status})`);
+                        if (status === 201 || status === 200) {
+                            let response;
+                            try {
+                                response = JSON.parse(responseText);
+                            } catch (parseError) {
+                                console.log(`Immich Wallpaper: Invalid JSON response: ${parseError}`);
+                                callback(false, 'Invalid response from server');
+                                return;
+                            }
+                            
+                            if (!response.accessToken) {
+                                console.log('Immich Wallpaper: No access token in response');
+                                callback(false, 'No access token received');
+                                return;
+                            }
+                            
+                            this._accessToken = response.accessToken;
+                            console.log('Immich Wallpaper: Authentication successful');
+                            console.log(`Immich Wallpaper: Token: ${this._accessToken.substring(0, 20)}...`);
+                            callback(true, null);
+                        } else if (status === 401) {
+                            console.log('Immich Wallpaper: Invalid credentials');
+                            callback(false, 'Invalid email or password');
+                        } else if (status === 0) {
+                            console.log('Immich Wallpaper: Could not connect to server');
+                            callback(false, 'Could not connect to server');
+                        } else {
+                            console.log(`Immich Wallpaper: Auth failed with status ${status}`);
+                            console.log(`Immich Wallpaper: Response: ${responseText}`);
+                            callback(false, `Server error (status ${status})`);
+                        }
+                    } catch (e) {
+                        console.log(`Immich Wallpaper: Error during authentication: ${e}`);
+                        callback(false, `Connection error: ${e.message || e}`);
                     }
-                } catch (e) {
-                    console.log(`Immich Wallpaper: Error during authentication: ${e}`);
-                    callback(false, `Connection error: ${e.message || e}`);
                 }
-            }
-        );
+            );
+        }
     }
 
     _fetchPhotoList(callback) {
@@ -341,11 +347,18 @@ export default class ImmichWallpaperExtension extends Extension {
         }
         
         console.log(`Immich Wallpaper: API URL: ${apiUrl}`);
-        console.log(`Immich Wallpaper: Using token: ${this._accessToken ? this._accessToken.substring(0, 20) + '...' : 'NULL'}`);
         
         let message = Soup.Message.new('GET', apiUrl);
         let headers = message.get_request_headers();
-        headers.append('Authorization', `Bearer ${this._accessToken}`);
+
+        let apiKey = this._settings.get_string('apikey')
+        if(apiKey) {
+            console.log(`Immich Wallpaper: Using API Key: ${apiKey ? apiKey.substring(0, 10) + '...' : 'NULL'}`);
+            headers.append('x-api-key', apiKey);
+        } else {
+            console.log(`Immich Wallpaper: Using token: ${this._accessToken ? this._accessToken.substring(0, 20) + '...' : 'NULL'}`);
+            headers.append('Authorization', `Bearer ${this._accessToken}`);
+        }
         
         this._session.send_and_read_async(
             message,
@@ -473,7 +486,13 @@ export default class ImmichWallpaperExtension extends Extension {
         
         let message = Soup.Message.new('GET', photoUrl);
         let headers = message.get_request_headers();
-        headers.append('Authorization', `Bearer ${this._accessToken}`);
+
+        let apiKey = this._settings.get_string('apikey');
+        if(apiKey) {
+            headers.append('x-api-key', apiKey);
+        } else {
+            headers.append('Authorization', `Bearer ${this._accessToken}`);
+        }
         
         this._session.send_and_read_async(
             message,
@@ -540,7 +559,13 @@ export default class ImmichWallpaperExtension extends Extension {
         let metadataUrl = `${serverUrl}/api/assets/${photo.id}`;
         let message = Soup.Message.new('GET', metadataUrl);
         let headers = message.get_request_headers();
-        headers.append('Authorization', `Bearer ${this._accessToken}`);
+
+        let apiKey = this._settings.get_string('apikey');
+        if(apiKey) {
+            headers.append('x-api-key', apiKey);
+        } else {
+            headers.append('Authorization', `Bearer ${this._accessToken}`);
+        }
         
         this._session.send_and_read_async(
             message,

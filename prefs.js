@@ -70,6 +70,16 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
         });
         connectionGroup.add(passwordRow);
 
+        // API Key
+        const apiKeyRow = new Adw.PasswordEntryRow({
+            title: _('API-Key'),
+            text: settings.get_string('apikey'),
+        });
+        apiKeyRow.connect('changed', (entry) => {
+            settings.set_string('apikey', entry.text);
+        });
+        connectionGroup.add(apiKeyRow);
+
         // Test connection button
         const testConnectionRow = new Adw.ActionRow({
             title: _('Test Connection'),
@@ -269,7 +279,7 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
             testConnectionButton.label = _('Testing...');
             connectionStatusIcon.icon_name = 'content-loading-symbolic';
             
-            this._testConnection(settings, (success, message, token) => {
+            this._testConnection(settings, (success, message, token, apiKey) => {
                 testConnectionButton.sensitive = true;
                 testConnectionButton.label = _('Test');
                 
@@ -278,7 +288,7 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
                     testConnectionRow.subtitle = _('Connection successful!');
                     
                     // Automatically refresh albums on successful connection
-                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token);
+                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey);
                 } else {
                     connectionStatusIcon.icon_name = 'dialog-error-symbolic';
                     testConnectionRow.subtitle = message || _('Connection failed');
@@ -291,11 +301,11 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
             refreshAlbumsButton.sensitive = false;
             albumRow.subtitle = _('Refreshing...');
             
-            this._testConnection(settings, (success, message, token) => {
+            this._testConnection(settings, (success, message, token, apiKey) => {
                 refreshAlbumsButton.sensitive = true;
                 
                 if (success) {
-                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token);
+                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey);
                 } else {
                     albumRow.subtitle = message || _('Connection failed');
                 }
@@ -310,9 +320,10 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
         const serverUrl = settings.get_string('server-url');
         const email = settings.get_string('email');
         const password = settings.get_string('password');
+        const apiKey = settings.get_string('apikey');
         
-        if (!serverUrl || !email || !password) {
-            callback(false, _('Please fill in all connection fields'), null);
+        if (!(serverUrl && ((email && password) || apiKey))) {
+            callback(false, _('Please either provide an API key or fill in email and password'), null);
             return;
         }
 
@@ -321,11 +332,15 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
         if (authUrl.endsWith('/')) {
             authUrl = authUrl.slice(0, -1);
         }
-        authUrl = `${authUrl}/api/auth/login`;
-        
+        if(apiKey) {
+            authUrl = `${authUrl}/api/api-keys/me`;
+        } else {
+            authUrl = `${authUrl}/api/auth/login`;
+        }
+            
         let authMessage;
         try {
-            authMessage = Soup.Message.new('POST', authUrl);
+            authMessage = Soup.Message.new(apiKey ? 'GET' : 'POST', authUrl);
             if (!authMessage) {
                 callback(false, _('Invalid server URL'), null);
                 return;
@@ -334,16 +349,19 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
             callback(false, _('Invalid server URL format'), null);
             return;
         }
-        
-        const authData = {
-            email: email,
-            password: password,
-        };
-        
-        authMessage.set_request_body_from_bytes(
-            'application/json',
-            new GLib.Bytes(JSON.stringify(authData))
-        );
+            
+        if(apiKey) {
+            authMessage.get_request_headers().append('x-api-key', apiKey);
+        } else {
+            const authData = {
+                email: email,
+                password: password,
+            };
+            authMessage.set_request_body_from_bytes(
+                'application/json',
+                new GLib.Bytes(JSON.stringify(authData))
+            );
+        }
 
         session.send_and_read_async(authMessage, GLib.PRIORITY_DEFAULT, null, (session, result) => {
             try {
@@ -351,41 +369,45 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
                 const status = authMessage.get_status();
                 
                 if (status === 0) {
-                    callback(false, _('Could not connect to server'), null);
+                    callback(false, _('Could not connect to server'), null, null);
                     return;
                 }
                 
                 if (status !== 200 && status !== 201) {
                     if (status === 401) {
-                        callback(false, _('Invalid email or password'), null);
+                        callback(false, _('Invalid apiKey/email or password'), null, null);
                     } else {
-                        callback(false, _('Server error (status %d)').replace('%d', status), null);
+                        callback(false, _('Server error (status %d)').replace('%d', status), null, null);
                     }
                     return;
                 }
 
-                const data = authBytes.get_data();
-                if (!data || data.length === 0) {
-                    callback(false, _('Empty response from server'), null);
-                    return;
-                }
+                if(apiKey) {
+                    callback(true, null, null, apiKey);
+                } else {
+                    const data = authBytes.get_data();
+                    if (!data || data.length === 0) {
+                        callback(false, _('Empty response from server'), null, null);
+                        return;
+                    }
 
-                const authResponse = JSON.parse(new TextDecoder().decode(data));
-                
-                if (!authResponse.accessToken) {
-                    callback(false, _('No access token received'), null);
-                    return;
-                }
-                
-                callback(true, null, authResponse.accessToken);
+                    const authResponse = JSON.parse(new TextDecoder().decode(data));
+                    
+                    if (!authResponse.accessToken) {
+                        callback(false, _('No access token received'), null, null);
+                        return;
+                    }
+                    
+                    callback(true, null, authResponse.accessToken, null);
+                }   
             } catch (error) {
                 console.error('Error testing connection:', error);
-                callback(false, _('Connection error: %s').replace('%s', error.message || error), null);
+                callback(false, _('Connection error: %s').replace('%s', error.message || error), null, null);
             }
         });
     }
 
-    _refreshAlbums(settings, albumModel, albumRow, albumIds, token) {
+    _refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey) {
         let serverUrl = settings.get_string('server-url');
         if (serverUrl.endsWith('/')) {
             serverUrl = serverUrl.slice(0, -1);
@@ -400,7 +422,12 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
         const session = new Soup.Session();
         const albumsUrl = `${serverUrl}/api/albums`;
         const albumsMessage = Soup.Message.new('GET', albumsUrl);
-        albumsMessage.get_request_headers().append('Authorization', `Bearer ${token}`);
+        if(apiKey) {
+            albumsMessage.get_request_headers().append('x-api-key', apiKey);
+        } else {
+            albumsMessage.get_request_headers().append('Authorization', `Bearer ${token}`);
+        }
+        
 
         session.send_and_read_async(albumsMessage, GLib.PRIORITY_DEFAULT, null, (session, result) => {
             try {
