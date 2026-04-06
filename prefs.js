@@ -17,11 +17,11 @@
  */
 
 import Gtk from 'gi://Gtk';
-import Gio from 'gi://Gio';
 import Adw from 'gi://Adw';
-import Soup from 'gi://Soup';
 import GLib from 'gi://GLib';
 import Gdk from 'gi://Gdk';
+
+import { ImmichApi } from './api.js';
 
 import {ExtensionPreferences, gettext as _} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
@@ -279,20 +279,18 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
             testConnectionButton.label = _('Testing...');
             connectionStatusIcon.icon_name = 'content-loading-symbolic';
             
-            this._testConnection(settings, (success, message, token, apiKey) => {
+            this._testConnection(settings).then(() => {
+                connectionStatusIcon.icon_name = 'emblem-ok-symbolic';
+                testConnectionRow.subtitle = _('Connection successful!');
+                
+                // Automatically refresh albums on successful connection
+                this._refreshAlbums(settings, albumModel, albumRow, albumIds);
+            }).catch((e) => {
+                connectionStatusIcon.icon_name = 'dialog-error-symbolic';
+                testConnectionRow.subtitle = e || _('Connection failed');
+            }).finally(() => {
                 testConnectionButton.sensitive = true;
                 testConnectionButton.label = _('Test');
-                
-                if (success) {
-                    connectionStatusIcon.icon_name = 'emblem-ok-symbolic';
-                    testConnectionRow.subtitle = _('Connection successful!');
-                    
-                    // Automatically refresh albums on successful connection
-                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey);
-                } else {
-                    connectionStatusIcon.icon_name = 'dialog-error-symbolic';
-                    testConnectionRow.subtitle = message || _('Connection failed');
-                }
             });
         });
         
@@ -301,14 +299,12 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
             refreshAlbumsButton.sensitive = false;
             albumRow.subtitle = _('Refreshing...');
             
-            this._testConnection(settings, (success, message, token, apiKey) => {
+            this._testConnection(settings).then(() => {                
+                this._refreshAlbums(settings, albumModel, albumRow, albumIds);
+            }).catch((e) => {
+                albumRow.subtitle = e || _('Connection failed');
+            }).finally(() => {
                 refreshAlbumsButton.sensitive = true;
-                
-                if (success) {
-                    this._refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey);
-                } else {
-                    albumRow.subtitle = message || _('Connection failed');
-                }
             });
         });
         
@@ -316,171 +312,67 @@ export default class ImmichWallpaperPreferences extends ExtensionPreferences {
         this._loadAlbums(settings, albumModel, albumRow, albumIds);
     }
 
-    _testConnection(settings, callback) {
-        const serverUrl = settings.get_string('server-url');
-        const email = settings.get_string('email');
-        const password = settings.get_string('password');
-        const apiKey = settings.get_string('apikey');
+    async _testConnection(settings) {
+        let api = new ImmichApi(settings);
         
-        if (!(serverUrl && ((email && password) || apiKey))) {
-            callback(false, _('Please either provide an API key or fill in email and password'), null);
-            return;
+        if (!api.checkConfiguration()) {
+            throw 'Please either provide an API key or fill in email and password';
         }
-
-        const session = new Soup.Session();
-        let authUrl = serverUrl;
-        if (authUrl.endsWith('/')) {
-            authUrl = authUrl.slice(0, -1);
-        }
-        if(apiKey) {
-            authUrl = `${authUrl}/api/api-keys/me`;
-        } else {
-            authUrl = `${authUrl}/api/auth/login`;
-        }
-            
-        let authMessage;
+        
         try {
-            authMessage = Soup.Message.new(apiKey ? 'GET' : 'POST', authUrl);
-            if (!authMessage) {
-                callback(false, _('Invalid server URL'), null);
-                return;
-            }
-        } catch (e) {
-            callback(false, _('Invalid server URL format'), null);
-            return;
+            await api.checkAuthentication();
+        } catch(e) {
+            throw e.text;
         }
-            
-        if(apiKey) {
-            authMessage.get_request_headers().append('x-api-key', apiKey);
-        } else {
-            const authData = {
-                email: email,
-                password: password,
-            };
-            authMessage.set_request_body_from_bytes(
-                'application/json',
-                new GLib.Bytes(JSON.stringify(authData))
-            );
-        }
-
-        session.send_and_read_async(authMessage, GLib.PRIORITY_DEFAULT, null, (session, result) => {
-            try {
-                const authBytes = session.send_and_read_finish(result);
-                const status = authMessage.get_status();
-                
-                if (status === 0) {
-                    callback(false, _('Could not connect to server'), null, null);
-                    return;
-                }
-                
-                if (status !== 200 && status !== 201) {
-                    if (status === 401) {
-                        callback(false, _('Invalid apiKey/email or password'), null, null);
-                    } else {
-                        callback(false, _('Server error (status %d)').replace('%d', status), null, null);
-                    }
-                    return;
-                }
-
-                if(apiKey) {
-                    callback(true, null, null, apiKey);
-                } else {
-                    const data = authBytes.get_data();
-                    if (!data || data.length === 0) {
-                        callback(false, _('Empty response from server'), null, null);
-                        return;
-                    }
-
-                    const authResponse = JSON.parse(new TextDecoder().decode(data));
-                    
-                    if (!authResponse.accessToken) {
-                        callback(false, _('No access token received'), null, null);
-                        return;
-                    }
-                    
-                    callback(true, null, authResponse.accessToken, null);
-                }   
-            } catch (error) {
-                console.error('Error testing connection:', error);
-                callback(false, _('Connection error: %s').replace('%s', error.message || error), null, null);
-            }
-        });
     }
 
-    _refreshAlbums(settings, albumModel, albumRow, albumIds, token, apiKey) {
-        let serverUrl = settings.get_string('server-url');
-        if (serverUrl.endsWith('/')) {
-            serverUrl = serverUrl.slice(0, -1);
-        }
-        
+    _refreshAlbums(settings, albumModel, albumRow, albumIds) {        
         // Clear existing albums (except "All Photos")
         while (albumModel.get_n_items() > 1) {
             albumModel.remove(1);
         }
         albumIds.length = 1; // Keep only the first empty string
-        
-        const session = new Soup.Session();
-        const albumsUrl = `${serverUrl}/api/albums`;
-        const albumsMessage = Soup.Message.new('GET', albumsUrl);
-        if(apiKey) {
-            albumsMessage.get_request_headers().append('x-api-key', apiKey);
-        } else {
-            albumsMessage.get_request_headers().append('Authorization', `Bearer ${token}`);
-        }
-        
 
-        session.send_and_read_async(albumsMessage, GLib.PRIORITY_DEFAULT, null, (session, result) => {
-            try {
-                const albumsBytes = session.send_and_read_finish(result);
 
-                if (albumsMessage.get_status() !== 200) {
-                    albumRow.subtitle = _('Failed to load albums');
-                    return;
-                }
+        let api = new ImmichApi(settings);
+        api.get('albums').then((albums) => {
+            // Sort albums by name
+            albums.sort((a, b) => a.albumName.localeCompare(b.albumName));
 
-                const albums = JSON.parse(new TextDecoder().decode(albumsBytes.get_data()));
-                
-                // Sort albums by name
-                albums.sort((a, b) => a.albumName.localeCompare(b.albumName));
-                
-                // Add albums to the model
-                for (const album of albums) {
-                    const displayName = `${album.albumName} (${album.assetCount} photos)`;
-                    albumModel.append(displayName);
-                    albumIds.push(album.id);
-                }
-
-                // Set current selection
-                const currentAlbumId = settings.get_string('album-id');
-                const currentIndex = albumIds.indexOf(currentAlbumId);
-                if (currentIndex !== -1) {
-                    albumRow.selected = currentIndex;
-                }
-
-                // Update subtitle
-                albumRow.subtitle = _('%d albums available').replace('%d', albums.length);
-
-            } catch (error) {
-                console.error('Error refreshing albums:', error);
-                albumRow.subtitle = _('Error loading albums');
+            // Add albums to the model
+            for (const album of albums) {
+                const displayName = `${album.albumName} (${album.assetCount} photos)`;
+                albumModel.append(displayName);
+                albumIds.push(album.id);
             }
+
+            // Set current selection
+            const currentAlbumId = settings.get_string('album-id');
+            const currentIndex = albumIds.indexOf(currentAlbumId);
+            if (currentIndex !== -1) {
+                albumRow.selected = currentIndex;
+            }
+
+            // Update subtitle
+            albumRow.subtitle = _('%d albums available').replace('%d', albums.length);
+        }, (e) => {
+            console.error('Immich Wallpaper: Error refreshing albums:', e.text, e.code);
+            albumRow.subtitle = _('Error loading albums');
         });
     }
 
     _loadAlbums(settings, albumModel, albumRow, albumIds) {
         // Use _testConnection to authenticate and then _refreshAlbums to load albums
-        this._testConnection(settings, (success, message, token) => {
-            if (success) {
-                // Connect selection change handler before loading albums
-                albumRow.connect('notify::selected', (row) => {
-                    const selectedId = albumIds[row.selected];
-                    settings.set_string('album-id', selectedId);
-                });
-                
-                this._refreshAlbums(settings, albumModel, albumRow, albumIds, token);
-            } else {
-                albumRow.subtitle = message || _('Please configure server connection first');
-            }
+        this._testConnection(settings).then(() => {
+            // Connect selection change handler before loading albums
+            albumRow.connect('notify::selected', (row) => {
+                const selectedId = albumIds[row.selected];
+                settings.set_string('album-id', selectedId);
+            });
+            
+            this._refreshAlbums(settings, albumModel, albumRow, albumIds);
+        }, (e) => {
+            albumRow.subtitle = e || _('Please configure server connection first');
         });
     }
 }

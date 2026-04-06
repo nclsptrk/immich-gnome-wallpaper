@@ -13,6 +13,7 @@ mkdir -p "$EXTENSION_DIR"
 
 # Copy files
 echo "📋 Copying files..."
+cp api.js "$EXTENSION_DIR/"
 cp extension.js "$EXTENSION_DIR/"
 cp prefs.js "$EXTENSION_DIR/"
 cp metadata.json "$EXTENSION_DIR/"

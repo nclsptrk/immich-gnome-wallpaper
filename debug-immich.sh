@@ -3,9 +3,9 @@
 # Debug script to test Immich API
 # Useful to verify that endpoints work correctly
 
-SERVER_URL="https://fotos.perkalnet.mooo.com"
-EMAIL="oslopezaguilar@gmail.com"
-PASSWORD="PalosEnCara"
+SERVER_URL="https://example.com"
+EMAIL="test@example.com"
+PASSWORD="changeme"
 
 echo "🔍 Testing Immich API..."
 echo "Server: $SERVER_URL"

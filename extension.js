@@ -2,26 +2,26 @@
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
-import Soup from 'gi://Soup';
 import St from 'gi://St';
-import Clutter from 'gi://Clutter';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import { ImmichApi } from './api.js';
 
 export default class ImmichWallpaperExtension extends Extension {
     enable() {
         console.log('Enabling Immich Wallpaper extension');
         
         this._settings = this.getSettings();
+        this._api = new ImmichApi(this._settings);
+
         this._cacheDir = GLib.build_filenamev([GLib.get_user_cache_dir(), 'immich-wallpaper']);
         this._indexFilePath = GLib.build_filenamev([this._cacheDir, 'current-index']);
         this._timeoutId = null;
         this._session = null;
-        this._accessToken = null;
         this._photoList = [];
         this._currentIndex = 0;
         this._notificationSource = null;
@@ -36,17 +36,22 @@ export default class ImmichWallpaperExtension extends Extension {
         // Load the current index from file
         this._loadCurrentIndex();
 
-        this._session = new Soup.Session();
-        this._createIndicator();
-        this._startRotation();
-        
-        this._settingsChangedId = this._settings.connect('changed', (settings, key) => {
-            if (key === 'show-panel-icon') {
-                this._updateIndicatorVisibility();
-            } else {
-                this._restartRotation();
-            }
-        });
+        if(this._api.checkConfiguration()) {
+            this._api.checkAuthentication().then(() => {
+                this._createIndicator();
+                this._startRotation();
+                
+                this._settingsChangedId = this._settings.connect('changed', (settings, key) => {
+                    if (key === 'show-panel-icon') {
+                        this._updateIndicatorVisibility();
+                    } else {
+                        this._restartRotation();
+                    }
+                });
+            }, (e) => {
+                this._scheduleRetry();
+            });
+        }
     }
 
     disable() {
@@ -82,8 +87,7 @@ export default class ImmichWallpaperExtension extends Extension {
         }
         
         this._settings = null;
-        this._session = null;
-        this._accessToken = null;
+        this._api = null;
         this._photoList = [];
         this._currentIndex = 0;
         this._cacheDir = null;
@@ -179,17 +183,15 @@ export default class ImmichWallpaperExtension extends Extension {
     }
 
     _startRotation() {
-        this._authenticate((success, errorMessage) => {
-            if (success) {
-                this._fetchPhotoList(() => {
-                    this._changeWallpaper();
-                    this._scheduleNextChange();
-                });
-            } else {
-                console.log(`Immich Wallpaper: Authentication failed - ${errorMessage || 'Unknown error'}`);
-                // Schedule a retry after 5 minutes
-                this._scheduleRetry();
-            }
+        this._fetchPhotoList().then(() => {
+            this._changeWallpaper();
+            this._scheduleNextChange();
+        }, (e) => {
+            console.log(`Immich Wallpaper: Failed to fetch photos with status ${e.code}`);
+            console.log(`Immich Wallpaper: Response: ${e.text.substring(0, 200)}`);
+
+            // Schedule a retry after 5 minutes
+            this._scheduleRetry();
         });
     }
 
@@ -221,186 +223,41 @@ export default class ImmichWallpaperExtension extends Extension {
         this._startRotation();
     }
 
-    _authenticate(callback) {
-        let serverUrl = this._settings.get_string('server-url');
-        let email = this._settings.get_string('email');
-        let password = this._settings.get_string('password');
-        let apiKey = this._settings.get_string('apikey');
-        
-        if (!(serverUrl && ((email && password) || apiKey))) {
-            console.log('Immich Wallpaper: Missing configuration');
-            callback(false, 'Missing configuration (server URL, email, or password)');
-            return;
-        }
-
-        if (serverUrl.endsWith('/')) {
-            serverUrl = serverUrl.slice(0, -1);
-        }
-        
-        if(apiKey) {
-            callback(true, null);
-            return;
-        } else {
-            let authUrl = `${serverUrl}/api/auth/login`;
-            let message;
-            
-            try {
-                message = Soup.Message.new('POST', authUrl);
-                if (!message) {
-                    console.log('Immich Wallpaper: Invalid server URL');
-                    callback(false, 'Invalid server URL');
-                    return;
-                }
-            } catch (e) {
-                console.log(`Immich Wallpaper: Error creating request: ${e}`);
-                callback(false, 'Invalid server URL format');
-                return;
-            }
-            
-            let requestBody = JSON.stringify({
-                email: email,
-                password: password
-            });
-            
-            message.set_request_body_from_bytes(
-                'application/json',
-                new GLib.Bytes(requestBody)
-            );
-            
-            this._session.send_and_read_async(
-                message,
-                GLib.PRIORITY_DEFAULT,
-                null,
-                (session, result) => {
-                    try {
-                        let bytes = session.send_and_read_finish(result);
-                        let data = bytes.get_data();
-                        
-                        if (!data || data.length === 0) {
-                            console.log('Immich Wallpaper: Empty response from server');
-                            callback(false, 'Empty response from server');
-                            return;
-                        }
-                        
-                        let responseText = new TextDecoder().decode(data);
-                        let status = message.get_status();
-                        
-                        if (status === 201 || status === 200) {
-                            let response;
-                            try {
-                                response = JSON.parse(responseText);
-                            } catch (parseError) {
-                                console.log(`Immich Wallpaper: Invalid JSON response: ${parseError}`);
-                                callback(false, 'Invalid response from server');
-                                return;
-                            }
-                            
-                            if (!response.accessToken) {
-                                console.log('Immich Wallpaper: No access token in response');
-                                callback(false, 'No access token received');
-                                return;
-                            }
-                            
-                            this._accessToken = response.accessToken;
-                            console.log('Immich Wallpaper: Authentication successful');
-                            console.log(`Immich Wallpaper: Token: ${this._accessToken.substring(0, 20)}...`);
-                            callback(true, null);
-                        } else if (status === 401) {
-                            console.log('Immich Wallpaper: Invalid credentials');
-                            callback(false, 'Invalid email or password');
-                        } else if (status === 0) {
-                            console.log('Immich Wallpaper: Could not connect to server');
-                            callback(false, 'Could not connect to server');
-                        } else {
-                            console.log(`Immich Wallpaper: Auth failed with status ${status}`);
-                            console.log(`Immich Wallpaper: Response: ${responseText}`);
-                            callback(false, `Server error (status ${status})`);
-                        }
-                    } catch (e) {
-                        console.log(`Immich Wallpaper: Error during authentication: ${e}`);
-                        callback(false, `Connection error: ${e.message || e}`);
-                    }
-                }
-            );
-        }
-    }
-
-    _fetchPhotoList(callback) {
-        let serverUrl = this._settings.get_string('server-url');
-        console.log(`Immich Wallpaper: Server URL from settings: ${serverUrl}`);
-        
-        if (serverUrl.endsWith('/')) {
-            serverUrl = serverUrl.slice(0, -1);
-        }
-        
-        let albumId = this._settings.get_string('album-id');
+    async _fetchPhotoList() {
         let apiUrl;
-        
+        let albumId = this._settings.get_string('album-id');
         if (albumId && albumId.trim() !== '') {
             // Use specific album
-            apiUrl = `${serverUrl}/api/albums/${albumId.trim()}`;
+            apiUrl = `albums/${albumId.trim()}`;
             console.log(`Immich Wallpaper: Fetching photos from album ${albumId}`);
         } else {
             // Use random assets from all albums
-            apiUrl = `${serverUrl}/api/assets/random?count=100`;
+            apiUrl = `assets/random?count=100`;
             console.log(`Immich Wallpaper: Fetching random photos from all albums`);
         }
-        
-        console.log(`Immich Wallpaper: API URL: ${apiUrl}`);
-        
-        let message = Soup.Message.new('GET', apiUrl);
-        let headers = message.get_request_headers();
 
-        let apiKey = this._settings.get_string('apikey')
-        if(apiKey) {
-            console.log(`Immich Wallpaper: Using API Key: ${apiKey ? apiKey.substring(0, 10) + '...' : 'NULL'}`);
-            headers.append('x-api-key', apiKey);
+        let response = await this._api.get(apiUrl);
+
+        // Response from /api/assets/random is an array
+        // Response from /api/albums/{id} is {assets: [...]}
+        if (Array.isArray(response)) {
+            this._photoList = response.filter(asset => asset.type === 'IMAGE');
+        } else if (response.assets && Array.isArray(response.assets)) {
+            this._photoList = response.assets.filter(asset => asset.type === 'IMAGE');
         } else {
-            console.log(`Immich Wallpaper: Using token: ${this._accessToken ? this._accessToken.substring(0, 20) + '...' : 'NULL'}`);
-            headers.append('Authorization', `Bearer ${this._accessToken}`);
+            console.log(`Immich Wallpaper: Unexpected response format`);
+            this._photoList = [];
         }
         
-        this._session.send_and_read_async(
-            message,
-            GLib.PRIORITY_DEFAULT,
-            null,
-            (session, result) => {
-                try {
-                    let bytes = session.send_and_read_finish(result);
-                    let data = bytes.get_data();
-                    let responseText = new TextDecoder().decode(data);
-                    
-                    if (message.get_status() === 200) {
-                        let response = JSON.parse(responseText);
-                        // Response from /api/assets/random is an array
-                        // Response from /api/albums/{id} is {assets: [...]}
-                        if (Array.isArray(response)) {
-                            this._photoList = response.filter(asset => asset.type === 'IMAGE');
-                        } else if (response.assets && Array.isArray(response.assets)) {
-                            this._photoList = response.assets.filter(asset => asset.type === 'IMAGE');
-                        } else {
-                            console.log(`Immich Wallpaper: Unexpected response format`);
-                            this._photoList = [];
-                        }
-                        
-                        console.log(`Immich Wallpaper: Fetched ${this._photoList.length} photos`);
-                        
-                        if (this._photoList.length > 0) {
-                            // Validate index is within range after loading photos
-                            this._validateCurrentIndex();
-                            callback();
-                        } else {
-                            console.log('Immich Wallpaper: No photos available');
-                        }
-                    } else {
-                        console.log(`Immich Wallpaper: Failed to fetch photos with status ${message.get_status()}`);
-                        console.log(`Immich Wallpaper: Response: ${responseText.substring(0, 200)}`);
-                    }
-                } catch (e) {
-                    console.log(`Immich Wallpaper: Error fetching photos: ${e}`);
-                }
-            }
-        );
+        console.log(`Immich Wallpaper: Fetched ${this._photoList.length} photos`);
+        
+        if (this._photoList.length > 0) {
+            // Validate index is within range after loading photos
+            this._validateCurrentIndex();
+            return;
+        } else {
+            console.log('Immich Wallpaper: No photos available');
+        }
     }
 
     _changeWallpaper() {
@@ -414,7 +271,7 @@ export default class ImmichWallpaperExtension extends Extension {
         this._currentIndex = Math.floor(this._getRandomInRange(0, this._photoList.length));
         this._saveCurrentIndex();
         
-        this._downloadPhoto(photo, (filepath) => {
+        this._downloadPhoto(photo).then((filepath) => {
             if (filepath) {
                 this._setWallpaper(filepath);
                 
@@ -476,55 +333,30 @@ export default class ImmichWallpaperExtension extends Extension {
         }
     }
 
-    _downloadPhoto(photo, callback) {
-        let serverUrl = this._settings.get_string('server-url');
-        if (serverUrl.endsWith('/')) {
-            serverUrl = serverUrl.slice(0, -1);
-        }
-        // Use the asset/thumbnail endpoint with Bearer token
-        let photoUrl = `${serverUrl}/api/assets/${photo.id}/thumbnail?size=preview`;
-        
-        let message = Soup.Message.new('GET', photoUrl);
-        let headers = message.get_request_headers();
-
-        let apiKey = this._settings.get_string('apikey');
-        if(apiKey) {
-            headers.append('x-api-key', apiKey);
-        } else {
-            headers.append('Authorization', `Bearer ${this._accessToken}`);
-        }
-        
-        this._session.send_and_read_async(
-            message,
-            GLib.PRIORITY_DEFAULT,
-            null,
-            (session, result) => {
-                try {
-                    let bytes = session.send_and_read_finish(result);
-                    
-                    if (message.get_status() === 200) {
-                        let filename = `${photo.id}.jpg`;
-                        let filepath = GLib.build_filenamev([this._cacheDir, filename]);
-                        
-                        let file = Gio.File.new_for_path(filepath);
-                        let outputStream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-                        
-                        // Write bytes directly to the output stream
-                        outputStream.write_bytes(bytes, null);
-                        outputStream.close(null);
-                        
-                        console.log(`Immich Wallpaper: Downloaded ${filename}`);
-                        callback(filepath);
-                    } else {
-                        console.log(`Immich Wallpaper: Failed to download photo with status ${message.get_status()}`);
-                        callback(null);
-                    }
-                } catch (e) {
-                    console.log(`Immich Wallpaper: Error downloading photo: ${e}`);
-                    callback(null);
-                }
+    async _downloadPhoto(photo) {
+        try {
+            // TODO: we shoud allow to download fullsize images
+            let bytes = await this._api.getAsBytes(`assets/${photo.id}/thumbnail?size=preview`);
+            let filename = `${photo.id}.jpg`;
+            let filepath = GLib.build_filenamev([this._cacheDir, filename]);
+            
+            let file = Gio.File.new_for_path(filepath);
+            let outputStream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+            
+            // Write bytes directly to the output stream
+            outputStream.write_bytes(bytes, null);
+            outputStream.close(null);
+            
+            console.log(`Immich Wallpaper: Downloaded ${filename}`);
+            return filepath;
+        } catch (e) {
+            if(e.code) {
+                console.log(`Immich Wallpaper: Failed to download photo with status ${errorCode}`);
+            } else {
+                console.log(`Immich Wallpaper: Error downloading photo: ${e}`);
             }
-        );
+            throw e;
+        }
     }
 
     _setWallpaper(filepath) {
@@ -551,48 +383,17 @@ export default class ImmichWallpaperExtension extends Extension {
     }
 
     _fetchPhotoMetadata(photo) {
-        let serverUrl = this._settings.get_string('server-url');
-        if (serverUrl.endsWith('/')) {
-            serverUrl = serverUrl.slice(0, -1);
-        }
-        
-        let metadataUrl = `${serverUrl}/api/assets/${photo.id}`;
-        let message = Soup.Message.new('GET', metadataUrl);
-        let headers = message.get_request_headers();
-
-        let apiKey = this._settings.get_string('apikey');
-        if(apiKey) {
-            headers.append('x-api-key', apiKey);
-        } else {
-            headers.append('Authorization', `Bearer ${this._accessToken}`);
-        }
-        
-        this._session.send_and_read_async(
-            message,
-            GLib.PRIORITY_DEFAULT,
-            null,
-            (session, result) => {
-                try {
-                    let bytes = session.send_and_read_finish(result);
-                    
-                    if (message.get_status() === 200) {
-                        let data = bytes.get_data();
-                        let responseText = new TextDecoder().decode(data);
-                        let metadata = JSON.parse(responseText);
-                        
-                        // Update panel indicator menu
-                        this._updateIndicatorMenu(metadata);
-                        
-                        // Show notification if location display is enabled
-                        if (this._settings.get_boolean('show-location') && metadata.exifInfo) {
-                            this._showLocationNotification(metadata.exifInfo);
-                        }
-                    }
-                } catch (e) {
-                    console.log(`Immich Wallpaper: Error fetching metadata: ${e}`);
-                }
+        this._api.get(`assets/${photo.id}`).then((response) => {
+            // Update panel indicator menu
+            this._updateIndicatorMenu(response);
+            
+            // Show notification if location display is enabled
+            if (this._settings.get_boolean('show-location') && response.exifInfo) {
+                this._showLocationNotification(response.exifInfo);
             }
-        );
+        }, (e) => {
+            console.log(`Immich Wallpaper: Error fetching metadata: ${e.text} (${e.code})`);
+        });
     }
 
     _showLocationNotification(exifInfo) {
@@ -612,6 +413,12 @@ export default class ImmichWallpaperExtension extends Extension {
                 title: 'Immich Wallpaper',
                 iconName: 'image-x-generic-symbolic'
             });
+
+            // Reset the notification source if it's destroyed
+            this._notificationSource.connect('destroy', _source => {
+                this._notificationSource = null;
+            });
+
             Main.messageTray.add(this._notificationSource);
         }
         
