@@ -187,8 +187,8 @@ export default class ImmichWallpaperExtension extends Extension {
             this._changeWallpaper();
             this._scheduleNextChange();
         }, (e) => {
-            console.log(`Immich Wallpaper: Failed to fetch photos with status ${e.code}`);
-            console.log(`Immich Wallpaper: Response: ${e.text.substring(0, 200)}`);
+            console.error(`Immich Wallpaper: Failed to fetch photos with status ${e.code}`);
+            console.error(`Immich Wallpaper: Response: ${e.text.substring(0, 200)}`);
 
             // Schedule a retry after 5 minutes
             this._scheduleRetry();
@@ -303,7 +303,7 @@ export default class ImmichWallpaperExtension extends Extension {
                     }
                 }
             } catch (e) {
-                console.log(`Immich Wallpaper: Error loading index from file: ${e}`);
+                console.error(`Immich Wallpaper: Error loading index from file: ${e}`);
             }
         });
     }
@@ -329,14 +329,14 @@ export default class ImmichWallpaperExtension extends Extension {
                 null
             );
         } catch (e) {
-            console.log(`Immich Wallpaper: Error saving index to file: ${e}`);
+            console.error(`Immich Wallpaper: Error saving index to file: ${e}`);
         }
     }
 
     async _downloadPhoto(photo) {
         try {
             // TODO: we shoud allow to download fullsize images
-            let bytes = await this._api.getAsBytes(`assets/${photo.id}/thumbnail?size=preview`);
+            let bytes = await this._api.getAsBytes(`assets/${photo.id}/thumbnail?size=fullsize`);
             let filename = `${photo.id}.jpg`;
             let filepath = GLib.build_filenamev([this._cacheDir, filename]);
             
@@ -351,9 +351,9 @@ export default class ImmichWallpaperExtension extends Extension {
             return filepath;
         } catch (e) {
             if(e.code) {
-                console.log(`Immich Wallpaper: Failed to download photo with status ${errorCode}`);
+                console.error(`Immich Wallpaper: Failed to download photo with status ${errorCode}`);
             } else {
-                console.log(`Immich Wallpaper: Error downloading photo: ${e}`);
+                console.error(`Immich Wallpaper: Error downloading photo: ${e}`);
             }
             throw e;
         }
@@ -392,7 +392,7 @@ export default class ImmichWallpaperExtension extends Extension {
                 this._showLocationNotification(response.exifInfo);
             }
         }, (e) => {
-            console.log(`Immich Wallpaper: Error fetching metadata: ${e.text} (${e.code})`);
+            console.error(`Immich Wallpaper: Error fetching metadata: ${e.text} (${e.code})`);
         });
     }
 

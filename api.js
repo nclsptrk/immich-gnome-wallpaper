@@ -25,14 +25,14 @@ export class ImmichApi {
             let bytes = await this.requestBytes(path, method, body, authenticated);
             let data = bytes.get_data();
             if (!data || data.length === 0) {
-                console.log('Immich Wallpaper: Empty response from server');
+                console.error('Immich Wallpaper: Empty response from server');
                 throw this._error('Empty response from server', 200);
             }
             let responseText = new TextDecoder().decode(data);
             try {
                 return JSON.parse(responseText);
             } catch (parseError) {
-                console.log(`Immich Wallpaper: Invalid JSON response: ${parseError}`);
+                console.error(`Immich Wallpaper: Invalid JSON response: ${parseError}`);
                 throw new _error('Invalid response from server', 200);
             }
         } catch (e) {
@@ -54,11 +54,11 @@ export class ImmichApi {
             try {
                 message = Soup.Message.new(method, apiUrl);
                 if (!message) {
-                    console.log('Immich Wallpaper: Invalid server URL');
+                    console.error('Immich Wallpaper: Invalid server URL');
                     throw this._error('Invalid server URL');
                 }
             } catch (e) {
-                console.log(`Immich Wallpaper: Error creating request: ${e}`);
+                console.error(`Immich Wallpaper: Error creating request: ${e}`);
                 throw this._error('Invalid server URL format');
             }
 
@@ -79,18 +79,14 @@ export class ImmichApi {
                             let bytes = session.send_and_read_finish(result);
                             let status = message.get_status();
                             
-                            console.log(`Immich Wallpaper: send request`);
                             if (status === 200 || status === 201) {
-                                console.log(`Immich Wallpaper: ${path} ok ${status}`);
                                 resolve(bytes);
                                 return;
                             } else {
-                                console.log(`Immich Wallpaper: ${path} status ${status}`);
                                 reject(this._error(bytes, status));
                                 return;
                             }
                         } catch (e) {
-                            console.log(`Immich Wallpaper: send request error ${e}`);
                             reject(this._error(`Error while sending request: ${e}`));
                             return;
                         }
@@ -154,7 +150,7 @@ export class ImmichApi {
             // send an unauthenticated request to retrieve the accesstoken
             let response = await this.post("auth/login", requestBody, false);
             if (!response.accessToken) {
-                console.log('Immich Wallpaper: No access token in response');
+                console.error('Immich Wallpaper: No access token in response');
                 throw new Error();
             } else {
                 console.log(`Immich Wallpaper: Authentication successful`);
@@ -163,11 +159,11 @@ export class ImmichApi {
             }
         } catch (e) {
             if (e.code === 401) {
-                console.log('Immich Wallpaper: Invalid credentials');
+                console.error('Immich Wallpaper: Invalid credentials');
             } else if (e.code === 0) {
-                console.log('Immich Wallpaper: Could not connect to server');
+                console.error('Immich Wallpaper: Could not connect to server');
             } else {
-                console.log(`Immich Wallpaper: Authentication error ${e.code}: ${e.text}`);
+                console.error(`Immich Wallpaper: Authentication error ${e.code}: ${e.text}`);
             }
             throw e;
         }
